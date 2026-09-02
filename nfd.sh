@@ -32,6 +32,10 @@ fi
 registry_cache_file="$cache_dir/registry.json"
 release_cache_file="$cache_dir/release.json"
 
+# raw API responses downloaded by wget -N (named after URL basename)
+registry_raw_file="$cache_dir/fonts.json"
+release_raw_file="$cache_dir/latest"
+
 # font download location
 font_download_dir="/tmp/nerd-font-downloader"
 
@@ -50,58 +54,31 @@ repo="nerd-fonts"
 # see.
 font_list_file="bin/scripts/lib/fonts.json"
 
+trap 'exit 130' INT
+
 # FUNCTIONS ##################################################
 
-# handles actual downloading and parsing of font registry
-fetch_font_registry() {
-		
-	# download, extract & decode json file, filter out irrelavent data
-	# TODO: error handling
-	curl -s -L "https://api.github.com/repos/$author/$repo/contents/$font_list_file" | \
-		jq -r '.content' | base64 --decode | \
-		jq -r -c '[.fonts[] | {name: .patchedName, version: .version, isMonospaced: .isMonospaced, description: .description}]'
-}
-
-# wrapper to check if font registry exists and download if not
+# download and process font registry, using -N to only fetch if newer
 update_font_registry() {
-
-	# TODO: this only checks if it exists; a nice feature could be to check
-	# for updates or update after a certain amount of time; rn have to
-	# remove this file to get it to refresh
-	if [ ! -e "$registry_cache_file" ]; then
-		echo "Downloading Font Registry"
-		fetch_font_registry > "$registry_cache_file"
-	fi
+	echo "Updating Font Registry"
+	wget -qN -P "$cache_dir" "https://api.github.com/repos/$author/$repo/contents/$font_list_file"
+	jq -r '.content' "$registry_raw_file" | base64 --decode | \
+		jq -r -c '[.fonts[] | {name: .patchedName, version: .version, isMonospaced: .isMonospaced, description: .description}]' \
+		> "$registry_cache_file"
 }
 
-# downloads releases from github and parses out relevant data before saving
-fetch_releases() {
-
-	# download and filter out irrelavent data
-	# jq gets a little complicated
-	# TODO: error handling
-	# TODO: wget has -N flag which only downloads if file on server is newer, better option for this
-	
-	# NOTE: this creates seperate entries for .zip and .tar.xz downloads.
-	# I've make the executive decision that the added space is trivial
-	# compared to figuring out how to merge them with jq
-	curl -s -L "https://api.github.com/repos/$author/$repo/releases/latest" | \
-		jq -c '[.assets[] | {name: .name | sub("(.tar.xz|.zip)"; ""), url: [.browser_download_url]}]'
-}
-
-# check if releases cache exists and downloads it if not
+# download and process release info, using -N to only fetch if newer
 update_releases() {
-
-	# TODO: same as registry, this only checks for file existance
-	if [ ! -e "$release_cache_file" ]; then
-		echo "Downloading Release Registry"
-		fetch_releases > "$release_cache_file"
-	fi
+	echo "Updating Release Registry"
+	wget -qN -P "$cache_dir" "https://api.github.com/repos/$author/$repo/releases/latest"
+	# NOTE: this creates separate entries for .zip and .tar.xz downloads, merged by get_font_info
+	jq -c '[.assets[] | {name: (.name | sub("(\\.tar\\.xz|\\.zip)"; "")), url: [.browser_download_url]}]' \
+		"$release_raw_file" > "$release_cache_file"
 }
 
 # pick which fonts to download
 select_font() {
-	cat "$registry_cache_file" | jq -r '.[].name' | fzf +m --prompt="Choose which fonts to download> "
+	jq -r '.[].name' "$registry_cache_file" | fzf +m --prompt="Choose which fonts to download> "
 }
 
 # get font json for a given font
@@ -139,6 +116,7 @@ download_font() {
 
 	# gets the url of the file the user wants to download
 	url=$(confirm_download "$font_meta")
+	[[ $? -ne 0 ]] && exit
 
 	# provide some feedback
 	echo "Downloading $font"
@@ -207,6 +185,7 @@ main() {
 	init
 
 	font="$(select_font)"
+	[[ $? -ne 0 ]] && exit
 
 	download_font "$font"
 
